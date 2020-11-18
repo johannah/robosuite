@@ -156,6 +156,79 @@ def choose_robots(exclude_bimanual=False):
     # Return requested robot
     return list(robots)[k]
 
+def absinput2action(device, robot, active_arm="right", env_configuration=None):
+    """
+    Converts an input from an active device into a valid action sequence that can be fed into an env.step() call
+
+    If a reset is triggered from the device, immediately returns None. Else, returns the appropriate action
+
+    Args:
+        device (Device): A device from which user inputs can be converted into actions. 
+
+        robot (Robot): Which robot we're controlling
+
+        active_arm (str): Only applicable for multi-armed setups (e.g.: multi-arm environments or bimanual robots).
+            Allows inputs to be converted correctly if the control type (e.g.: IK) is dependent on arm choice.
+            Choices are {right, left}
+
+        env_configuration (str or None): Only applicable for multi-armed environments. Allows inputs to be converted
+            correctly if the control type (e.g.: IK) is dependent on the environment setup. Options are:
+            {bimanual, single-arm-parallel, single-arm-opposed}
+
+    Returns:
+        2-tuple:
+
+            - (None or np.array): Action interpreted from @device including any gripper action(s). None if we get a
+                reset signal from the device
+            - (None or int): 1 if desired close, -1 if desired open gripper state. None if get a reset signal from the
+                device
+
+    """
+    device_state = device.get_controller_state()
+    # Note: Devices output rotation with x and z flipped to account for robots starting with gripper facing down
+    #       Also note that the output rotation is an absolute rotation, output dpos is abs pos
+    #       Raw delta rotations from neutral user input is captured in raw_drotation (roll, pitch, yaw)
+    dpos, rotation, raw_drotation, grasp, reset = (
+        device_state["dpos"],
+        device_state["rotation"],
+        device_state["raw_drotation"],
+        device_state["grasp"],
+        device_state["reset"],
+    )
+
+    #from IPython import embed; embed()
+    # If we're resetting, immediately return None
+    if reset:
+        return None, None
+
+    # Get controller reference
+    controller = robot.controller if not isinstance(robot, Bimanual) else robot.controller[active_arm]
+    gripper_dof = robot.gripper.dof if not isinstance(robot, Bimanual) else robot.gripper[active_arm].dof
+
+    # First process the raw drotation
+    drotation = raw_drotation[[1, 0, 2]]
+    if controller.name == 'OSC_POSE':
+        # Flip z
+        drotation[2] = -drotation[2]
+        # Scale rotation for teleoperation (tuned for OSC)
+        drotation *= 75
+        #dpos *= 200
+        # Interpret euler angles as (mirrored) scaled axis angle values
+        drotation = -drotation
+    else:
+        # No other controllers currently supported
+        print("Error: Unsupported controller specified -- Robot must have either an IK or OSC-based controller!")
+
+    # map 0 to -1 (open) and map 1 to 1 (closed)
+    grasp = 1 if grasp else -1
+
+    # Create action based on action space of individual robot
+    action = np.concatenate([dpos, drotation, [grasp] * gripper_dof])
+    print("dpos from mimic", dpos)
+
+    # Return the action and grasp
+    return action, grasp
+
 
 def input2action(device, robot, active_arm="right", env_configuration=None):
     """
@@ -208,52 +281,53 @@ def input2action(device, robot, active_arm="right", env_configuration=None):
 
     # First process the raw drotation
     drotation = raw_drotation[[1, 0, 2]]
-    if controller.name == 'IK_POSE':
-        # If this is panda, want to swap x and y axis
-        if isinstance(robot.robot_model, Panda):
-            drotation = drotation[[1, 0, 2]]
-        else:
-            # Flip x
-            drotation[0] = -drotation[0]
-        # Scale rotation for teleoperation (tuned for IK)
-        drotation *= 10
-        dpos *= 5
-        # relative rotation of desired from current eef orientation
-        # map to quat
-        drotation = T.mat2quat(T.euler2mat(drotation))
+    #if controller.name == 'IK_POSE':
+    #    # If this is panda, want to swap x and y axis
+    #    if isinstance(robot.robot_model, Panda):
+    #        drotation = drotation[[1, 0, 2]]
+    #    else:
+    #        # Flip x
+    #        drotation[0] = -drotation[0]
+    #    # Scale rotation for teleoperation (tuned for IK)
+    #    drotation *= 10
+    #    dpos *= 5
+    #    # relative rotation of desired from current eef orientation
+    #    # map to quat
+    #    drotation = T.mat2quat(T.euler2mat(drotation))
 
-        # If we're using a non-forward facing configuration, need to adjust relative position / orientation
-        if env_configuration == "single-arm-opposed":
-            # Swap x and y for pos and flip x,y signs for ori
-            dpos = dpos[[1, 0, 2]]
-            drotation[0] = -drotation[0]
-            drotation[1] = -drotation[1]
-            if active_arm == "left":
-                # x pos needs to be flipped
-                dpos[0] = -dpos[0]
-            else:
-                # y pos needs to be flipped
-                dpos[1] = -dpos[1]
+    #    # If we're using a non-forward facing configuration, need to adjust relative position / orientation
+    #    if env_configuration == "single-arm-opposed":
+    #        # Swap x and y for pos and flip x,y signs for ori
+    #        dpos = dpos[[1, 0, 2]]
+    #        drotation[0] = -drotation[0]
+    #        drotation[1] = -drotation[1]
+    #        if active_arm == "left":
+    #            # x pos needs to be flipped
+    #            dpos[0] = -dpos[0]
+    #        else:
+    #            # y pos needs to be flipped
+    #            dpos[1] = -dpos[1]
 
-        # Lastly, map to axis angle form
-        drotation = T.quat2axisangle(drotation)
+    #    # Lastly, map to axis angle form
+    #    drotation = T.quat2axisangle(drotation)
 
-    elif controller.name == 'OSC_POSE':
-        # Flip z
-        drotation[2] = -drotation[2]
-        # Scale rotation for teleoperation (tuned for OSC)
-        drotation *= 75
-        dpos *= 200
-        # Interpret euler angles as (mirrored) scaled axis angle values
-        drotation = -drotation
-    else:
-        # No other controllers currently supported
-        print("Error: Unsupported controller specified -- Robot must have either an IK or OSC-based controller!")
+    #elif controller.name == 'OSC_POSE':
+    #    # Flip z
+    #    drotation[2] = -drotation[2]
+    #    # Scale rotation for teleoperation (tuned for OSC)
+    #    drotation *= 75
+    #    dpos *= 200
+    #    # Interpret euler angles as (mirrored) scaled axis angle values
+    #    drotation = -drotation
+    #else:
+    #    # No other controllers currently supported
+    #    print("Error: Unsupported controller specified -- Robot must have either an IK or OSC-based controller!")
 
-    # map 0 to -1 (open) and map 1 to 1 (closed)
-    grasp = 1 if grasp else -1
+    ## map 0 to -1 (open) and map 1 to 1 (closed)
+    #grasp = 1 if grasp else -1
 
-    # Create action based on action space of individual robot
+    ## Create action based on action space of individual robot
+    #print('using', dpos)
     action = np.concatenate([dpos, drotation, [grasp] * gripper_dof])
 
     # Return the action and grasp

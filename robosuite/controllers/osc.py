@@ -255,6 +255,9 @@ class OperationalSpaceController(Controller):
                                           position_limit=self.position_limits,
                                           set_pos=set_pos)
 
+        print("orig ee", self.initial_ee_pos)
+        print("self.goal_pos", self.goal_pos)
+        print("set_pos", set_pos)
         if self.interpolator_pos is not None:
             self.interpolator_pos.set_goal(self.goal_pos)
 
